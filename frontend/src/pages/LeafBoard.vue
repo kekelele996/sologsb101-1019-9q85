@@ -16,7 +16,7 @@ import { useIdbTable } from '@/hooks/useIdbTable'
 import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
-import { PAPER_TYPE_LABEL, type Paper } from '@/types/paper'
+import { PAPER_TYPE_LABEL, effectiveDeltaE, isPaperRetired, type Paper } from '@/types/paper'
 import {
   DAMAGE_TYPE_OPTIONS,
   LEAF_STATE_COLOR,
@@ -193,11 +193,12 @@ async function addLeafRecord(leaf: Leaf): Promise<void> {
   ElMessage.info(`同一叶号可叠加多种破损：已带出第 ${leaf.leafNo} 叶`)
 }
 
-/** 该叶已选配的补纸文案（补纸选配页维护） */
+/** 该叶已选配的补纸文案（补纸选配页维护，ΔE 按复染后实测值） */
 function paperText(leafId: string): string {
   const paper = paperTable.rows.value.find((item) => item.leafId === leafId)
   if (!paper) return '未选配'
-  return `${PAPER_TYPE_LABEL[paper.paperType]} · ΔE ${paper.deltaE}`
+  const suffix = isPaperRetired(paper) ? ' · 复染两回不达标，换纸种' : ''
+  return `${PAPER_TYPE_LABEL[paper.paperType]} · ΔE ${effectiveDeltaE(paper)}${suffix}`
 }
 
 function phTag(ph: number): { label: string; color: string } {

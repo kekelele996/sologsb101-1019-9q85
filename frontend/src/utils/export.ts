@@ -11,7 +11,7 @@ import type { Binding } from '@/types/binding'
 import { BOOK_LEVEL_LABEL } from '@/types/book'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL } from '@/types/volume'
 import { DAMAGE_TYPE_LABEL, LEAF_STATE_LABEL } from '@/types/leaf'
-import { PAPER_TYPE_LABEL, deltaELevel } from '@/types/paper'
+import { PAPER_TYPE_LABEL, deltaELevel, effectiveDeltaE, isPaperRetired, latestRedye, redyeCount } from '@/types/paper'
 import { REPAIR_NAME_LABEL } from '@/types/repairOrder'
 import { BINDING_VERDICT_LABEL } from '@/types/binding'
 import type { RestoreSnapshot } from './db'
@@ -87,8 +87,14 @@ export function buildArchiveReport(context: ExportContext): string {
       leaves.forEach((leaf) => {
         const orders = context.repairOrders.filter((order) => order.leafId === leaf.id)
         const done = orders.filter((order) => order.state === 'done').length
+        const paper = context.papers.find((item) => item.leafId === leaf.id)
+        const paperText = paper
+          ? `　补纸 ${PAPER_TYPE_LABEL[paper.paperType]} 实测ΔE ${effectiveDeltaE(paper)}（${
+              deltaELevel(effectiveDeltaE(paper)).label
+            }${isPaperRetired(paper) ? '，复染两回不达标需换纸种' : ''}）`
+          : ''
         lines.push(
-          `      · 第 ${leaf.leafNo} 叶　${DAMAGE_TYPE_LABEL[leaf.damageType]}　${leaf.damageAreaCm2} cm²　pH ${leaf.phValue}　${LEAF_STATE_LABEL[leaf.state]}　工序 ${done}/${orders.length}`
+          `      · 第 ${leaf.leafNo} 叶　${DAMAGE_TYPE_LABEL[leaf.damageType]}　${leaf.damageAreaCm2} cm²　pH ${leaf.phValue}　${LEAF_STATE_LABEL[leaf.state]}　工序 ${done}/${orders.length}${paperText}`
         )
       })
     })
@@ -104,7 +110,7 @@ export function exportArchiveReport(context: ExportContext): string {
   return filename
 }
 
-/** 书叶破损台账 CSV（含补纸与工序进度） */
+/** 书叶破损台账 CSV（含补纸复染登记与工序进度；色差判定按复染后实测值） */
 export function exportLeafLedgerCsv(context: ExportContext): string {
   const header = [
     '书名',
@@ -117,8 +123,12 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
     '补纸纸种',
     '帘纹',
     '厚度(mm)',
-    '色差ΔE',
+    '初测色差ΔE',
+    '复染后实测ΔE',
     'ΔE判定',
+    '复染回数',
+    '最近复染日期',
+    '候选状态',
     '染色配方',
     '工序进度',
     '最近工序',
@@ -138,6 +148,7 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
           .sort((a, b) => a.seq - b.seq)
         const done = orders.filter((order) => order.state === 'done').length
         const last = orders[orders.length - 1]
+        const latest = paper ? latestRedye(paper) : null
         lines.push(
           [
             book.title,
@@ -151,7 +162,11 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
             paper ? paper.laidPattern : '',
             paper ? paper.thicknessMm : '',
             paper ? paper.deltaE : '',
-            paper ? deltaELevel(paper.deltaE).label : '',
+            paper ? effectiveDeltaE(paper) : '',
+            paper ? deltaELevel(effectiveDeltaE(paper)).label : '',
+            paper ? redyeCount(paper) : '',
+            latest ? latest.date : '',
+            paper ? (isPaperRetired(paper) ? '复染两回不达标-已撤出候选' : '在候选') : '',
             paper ? paper.dyeRecipe : '',
             `${done}/${orders.length}`,
             last ? REPAIR_NAME_LABEL[last.name] : '',

@@ -28,7 +28,7 @@ import {
   type RepairOrder,
   type RepairOrderDraft
 } from '@/types/repairOrder'
-import { PAPER_TYPE_LABEL, type Paper } from '@/types/paper'
+import { PAPER_TYPE_LABEL, effectiveDeltaE, isPaperRetired, type Paper } from '@/types/paper'
 
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
@@ -288,8 +288,8 @@ watchEffect(() => {
         <span>当前书叶：第 {{ currentLeaf.leafNo }} 叶</span>
         <DamageTag :type="currentLeaf.damageType" :note="`${currentLeaf.damageAreaCm2} cm²`" />
         <el-tag effect="plain" round>pH {{ currentLeaf.phValue }}</el-tag>
-        <el-tag v-if="currentPaper" type="success" effect="plain" round>
-          补纸：{{ PAPER_TYPE_LABEL[currentPaper.paperType] }} · ΔE {{ currentPaper.deltaE }}
+        <el-tag v-if="currentPaper" :type="isPaperRetired(currentPaper) ? 'danger' : 'success'" effect="plain" round>
+          补纸：{{ PAPER_TYPE_LABEL[currentPaper.paperType] }} · 实测 ΔE {{ effectiveDeltaE(currentPaper) }}<template v-if="isPaperRetired(currentPaper)"> · 复染两回不达标，需换纸种</template>
         </el-tag>
         <el-tag v-else type="warning" effect="plain" round>尚未选配补纸</el-tag>
       </div>

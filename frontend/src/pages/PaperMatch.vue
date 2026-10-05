@@ -18,13 +18,21 @@ import {
   DEFAULT_DYE_RECIPE,
   DELTA_E_THRESHOLD,
   LAID_PATTERN_OPTIONS,
+  MAX_REDYE_ROUNDS,
   PAPER_TYPE_LABEL,
   PAPER_TYPE_OPTIONS,
   createEmptyPaperDraft,
   deltaELevel,
+  effectiveDeltaE,
+  isDeltaEQualified,
+  isPaperRetired,
+  latestRedye,
+  redyeCount,
+  todayText,
   type Paper,
   type PaperDraft,
-  type PaperType
+  type PaperType,
+  type RedyeRecord
 } from '@/types/paper'
 import { DAMAGE_TYPE_LABEL } from '@/types/leaf'
 import {
@@ -97,25 +105,30 @@ const rows = computed(() => {
         candidateScore(b, leafPattern(b.leafId)) - candidateScore(a, leafPattern(a.leafId))
       )
     }
-    return a.deltaE - b.deltaE
+    // ΔE 排序以复染后的实测色差为准
+    return effectiveDeltaE(a) - effectiveDeltaE(b)
   })
 })
 
 const stat = computed(() => {
   const list = paperTable.rows.value
   const averageDeltaE =
-    list.length === 0 ? 0 : Math.round((list.reduce((sum, paper) => sum + paper.deltaE, 0) / list.length) * 100) / 100
+    list.length === 0
+      ? 0
+      : Math.round(
+          (list.reduce((sum, paper) => sum + effectiveDeltaE(paper), 0) / list.length) * 100
+        ) / 100
   return {
     total: list.length,
     averageDeltaE,
-    redye: list.filter((paper) => needRedye(paper.deltaE)).length,
+    redye: list.filter((paper) => !isDeltaEQualified(paper)).length,
     coveredLeaves: new Set(list.map((paper) => paper.leafId)).size,
     matchRate:
       list.length === 0
         ? 0
-        : Math.round(
-            (list.filter((paper) => !needRedye(paper.deltaE)).length / list.length) * 100
-          )
+        : Math.round((list.filter((paper) => isDeltaEQualified(paper)).length / list.length) * 100),
+    redyed: list.filter((paper) => redyeCount(paper) > 0).length,
+    retired: list.filter((paper) => isPaperRetired(paper)).length
   }
 })
 
@@ -153,7 +166,8 @@ function openEdit(paper: Paper): void {
     laidPattern: paper.laidPattern,
     thicknessMm: paper.thicknessMm,
     deltaE: paper.deltaE,
-    dyeRecipe: paper.dyeRecipe
+    dyeRecipe: paper.dyeRecipe,
+    redyeHistory: paper.redyeHistory ?? []
   })
   dialog.value = true
 }
@@ -178,6 +192,7 @@ async function submit(): Promise<void> {
     return
   }
   if (editing.value) {
+    // 复染登记由「复染登记」对话框单独维护，编辑时带回原值避免覆盖
     await paperTable.update(editing.value.id, { ...form })
     ElMessage.success('已更新补纸记录')
   } else {
@@ -208,14 +223,16 @@ const candidates = computed(() => {
   const leaf = leafStore.leafById(candidateLeafId.value)
   if (!leaf) return []
   const patterns = ['二指帘纹', '三指帘纹', '细帘纹']
-  return PAPER_TYPE_OPTIONS.map((option) => {
+  return PAPER_TYPE_OPTIONS.flatMap((option) => {
     const paper = paperTable.rows.value.find(
       (item) => item.leafId === leaf.id && item.paperType === option.value
     )
-    const deltaE = paper ? paper.deltaE : deltaEForLeaf(leaf.damageType, option.value)
+    // 同一书叶同一种纸复染两回仍不达标：撤出候选推荐，提示修复师换纸种
+    if (paper && isPaperRetired(paper)) return []
+    const deltaE = paper ? effectiveDeltaE(paper) : deltaEForLeaf(leaf.damageType, option.value)
     const laidPattern = paper ? paper.laidPattern : patterns[leaf.leafNo % patterns.length]
     const thicknessMm = paper ? paper.thicknessMm : 0.06
-    return {
+    return [{
       type: option.value,
       label: PAPER_TYPE_LABEL[option.value],
       deltaE,
@@ -223,9 +240,24 @@ const candidates = computed(() => {
       thicknessMm,
       score: candidateScore({ deltaE, laidPattern, thicknessMm }, '二指帘纹'),
       hasRecord: Boolean(paper),
-      paperId: paper?.id ?? ''
-    }
+      paperId: paper?.id ?? '',
+      redyed: paper ? redyeCount(paper) : 0,
+      lastRedye: paper ? latestRedye(paper) : null
+    }]
   }).sort((a, b) => b.score - a.score)
+})
+
+/** 当前选中书叶上已被撤出候选的纸种（复染两回仍不达标） */
+const retiredTypes = computed(() => {
+  if (!candidateLeafId.value) return []
+  return paperTable.rows.value
+    .filter((paper) => paper.leafId === candidateLeafId.value && isPaperRetired(paper))
+    .map((paper) => ({
+      type: paper.paperType,
+      label: PAPER_TYPE_LABEL[paper.paperType],
+      last: latestRedye(paper),
+      count: redyeCount(paper)
+    }))
 })
 
 const candidateLeafPattern = computed(() =>
@@ -237,21 +269,75 @@ async function selectCandidate(type: PaperType, deltaE: number, laidPatternValue
   const existing = paperTable.rows.value.find(
     (item) => item.leafId === candidateLeafId.value && item.paperType === type
   )
-  const payload: PaperDraft = {
-    leafId: candidateLeafId.value,
-    paperType: type,
-    laidPattern: laidPatternValue,
-    thicknessMm,
-    deltaE,
-    dyeRecipe: DEFAULT_DYE_RECIPE[type]
-  }
   if (existing) {
-    await paperTable.update(existing.id, payload)
+    // 已有登记：只更新采用状态相关字段，保留初测估值与复染登记不被候选估算值覆盖
+    await paperTable.update(existing.id, {
+      laidPattern: laidPatternValue,
+      thicknessMm
+    })
     ElMessage.success(`已更新${PAPER_TYPE_LABEL[type]}候选`)
   } else {
+    const payload: PaperDraft = {
+      leafId: candidateLeafId.value,
+      paperType: type,
+      laidPattern: laidPatternValue,
+      thicknessMm,
+      deltaE,
+      dyeRecipe: DEFAULT_DYE_RECIPE[type],
+      redyeHistory: []
+    }
     await paperTable.create(payload, 'paper')
     ElMessage.success(`已采用${PAPER_TYPE_LABEL[type]}候选补纸`)
   }
+}
+
+/* ----------------------------- 复染登记 ----------------------------- */
+const redyeDialog = ref(false)
+const redyeTarget = ref<Paper | null>(null)
+const redyeForm = reactive<{ deltaE: number; date: string }>({ deltaE: 2, date: todayText() })
+
+function openRedye(paper: Paper): void {
+  if (isPaperRetired(paper)) {
+    ElMessage.warning(
+      `${PAPER_TYPE_LABEL[paper.paperType]}已复染 ${MAX_REDYE_ROUNDS} 回仍不达标，请更换纸种，不再登记复染`
+    )
+    return
+  }
+  redyeTarget.value = paper
+  redyeForm.deltaE = Math.max(0, Math.round((effectiveDeltaE(paper) - 1) * 10) / 10)
+  redyeForm.date = todayText()
+  redyeDialog.value = true
+}
+
+const redyeNextRound = computed(() => (redyeTarget.value ? redyeCount(redyeTarget.value) + 1 : 1))
+const redyeBeforeDeltaE = computed(() => (redyeTarget.value ? effectiveDeltaE(redyeTarget.value) : 0))
+
+async function submitRedye(): Promise<void> {
+  const target = redyeTarget.value
+  if (!target) return
+  if (!redyeForm.date) {
+    ElMessage.warning('请填写复染日期')
+    return
+  }
+  const record: RedyeRecord = {
+    round: redyeNextRound.value,
+    deltaE: redyeForm.deltaE,
+    date: redyeForm.date
+  }
+  const history = [...(target.redyeHistory ?? []), record]
+  await paperTable.update(target.id, { redyeHistory: history })
+
+  // 记好复染实测色差后，按新色差重算达标状态与综合评分
+  if (record.deltaE <= DELTA_E_THRESHOLD) {
+    ElMessage.success(`第 ${record.round} 回复染后实测 ΔE ${record.deltaE}，已达标，评分已重算`)
+  } else if (history.length >= MAX_REDYE_ROUNDS) {
+    ElMessage.warning(
+      `${PAPER_TYPE_LABEL[target.paperType]}复染 ${MAX_REDYE_ROUNDS} 回实测 ΔE 仍为 ${record.deltaE}，不达标：已从候选推荐撤出，请更换纸种`
+    )
+  } else {
+    ElMessage.warning(`第 ${record.round} 回复染后实测 ΔE ${record.deltaE} 仍超阈值，请再次复染`)
+  }
+  redyeDialog.value = false
 }
 
 function deltaTag(deltaE: number): { label: string; color: string } {
@@ -265,7 +351,7 @@ function deltaTag(deltaE: number): { label: string; color: string } {
       <div>
         <h2>补纸选配与染色比对</h2>
         <p>
-          按 ΔE 升序排列候选补纸（阈值 {{ DELTA_E_THRESHOLD }}），记录帘纹、厚度与染色配方；超阈值会提示重新染色。
+          按复染后的实测 ΔE 排列候选补纸（阈值 {{ DELTA_E_THRESHOLD }}）；复染登记回填实测色差与日期，自动重算达标状态与综合评分，复染两回仍不达标则撤出候选。
         </p>
       </div>
       <div class="gb-toolbar">
@@ -280,10 +366,11 @@ function deltaTag(deltaE: number): { label: string; color: string } {
 
     <div class="gb-stat-row">
       <StatBadge label="补纸记录" :value="stat.total" suffix="条" tone="primary" />
-      <StatBadge label="平均 ΔE" :value="stat.averageDeltaE" tone="warning" />
-      <StatBadge label="需重新染色" :value="stat.redye" suffix="条" tone="danger" />
-      <StatBadge label="覆盖书叶" :value="stat.coveredLeaves" suffix="叶" tone="info" />
+      <StatBadge label="平均实测 ΔE" :value="stat.averageDeltaE" tone="warning" />
+      <StatBadge label="仍不达标" :value="stat.redye" suffix="条" tone="danger" />
       <StatBadge label="ΔE 达标率" :value="`${stat.matchRate}%`" :percent="stat.matchRate" tone="success" />
+      <StatBadge label="已复染" :value="stat.redyed" suffix="条" tone="info" />
+      <StatBadge label="撤出候选(换纸种)" :value="stat.retired" suffix="种" tone="danger" />
     </div>
 
     <FilterBar
@@ -330,20 +417,55 @@ function deltaTag(deltaE: number): { label: string; color: string } {
               </template>
             </el-table-column>
             <el-table-column prop="thicknessMm" label="厚度(mm)" width="100" />
-            <el-table-column label="ΔE" width="140" sortable>
+            <el-table-column label="色差 ΔE（实测）" width="180">
               <template #default="{ row }">
-                {{ row.deltaE }}
-                <el-tag :style="{ color: deltaTag(row.deltaE).color, borderColor: `${deltaTag(row.deltaE).color}66` }" effect="plain" size="small" round>
-                  {{ deltaTag(row.deltaE).label }}
+                <div>
+                  {{ effectiveDeltaE(row) }}
+                  <el-tag :style="{ color: deltaTag(effectiveDeltaE(row)).color, borderColor: `${deltaTag(effectiveDeltaE(row)).color}66` }" effect="plain" size="small" round>
+                    {{ deltaTag(effectiveDeltaE(row)).label }}
+                  </el-tag>
+                </div>
+                <div class="gb-muted">
+                  初测估值 {{ row.deltaE }}<template v-if="redyeCount(row) > 0"> · 复染 {{ redyeCount(row) }} 回 · 最近 {{ latestRedye(row)?.date }}</template>
+                </div>
+                <el-tag v-if="isPaperRetired(row)" type="danger" effect="dark" size="small" round style="margin-top: 2px">
+                  复染两回不达标 · 已撤出候选
                 </el-tag>
               </template>
             </el-table-column>
             <el-table-column label="综合评分" width="100">
               <template #default="{ row }">{{ candidateScore(row, leafPattern(row.leafId)) }}</template>
             </el-table-column>
+            <el-table-column label="复染登记" min-width="190">
+              <template #default="{ row }">
+                <el-button
+                  size="small"
+                  type="primary"
+                  plain
+                  :disabled="isPaperRetired(row)"
+                  @click="openRedye(row)"
+                >
+                  {{ redyeCount(row) > 0 ? `登记第 ${redyeCount(row) + 1} 回复染` : '复染登记' }}
+                </el-button>
+                <el-tooltip
+                  v-if="(row.redyeHistory ?? []).length > 0"
+                  placement="top"
+                  effect="light"
+                >
+                  <template #content>
+                    <div v-for="item in row.redyeHistory" :key="item.round">
+                      第 {{ item.round }} 回 · {{ item.date }} · 实测 ΔE {{ item.deltaE }}
+                    </div>
+                  </template>
+                  <el-link type="info" :underline="false" style="margin-left: 6px; font-size: 12px">复染记录</el-link>
+                </el-tooltip>
+                <div v-else class="gb-muted">尚未复染</div>
+              </template>
+            </el-table-column>
             <el-table-column label="染色配方" min-width="200">
               <template #default="{ row }">
-                <el-tag v-if="needRedye(row.deltaE)" type="danger" effect="plain" size="small" round>需重新染色</el-tag>
+                <el-tag v-if="!isDeltaEQualified(row)" type="danger" effect="plain" size="small" round>需重新染色</el-tag>
+                <el-tag v-else-if="redyeCount(row) > 0" type="success" effect="plain" size="small" round>复染已达标</el-tag>
                 <div class="gb-muted">{{ row.dyeRecipe }}</div>
               </template>
             </el-table-column>
@@ -365,9 +487,27 @@ function deltaTag(deltaE: number): { label: string; color: string } {
           </el-select>
 
           <EmptyPanel
-            v-if="candidates.length === 0"
+            v-if="candidates.length === 0 && retiredTypes.length === 0"
             title="选择书叶后生成候选"
-            description="将按 ΔE、帘纹匹配度与厚度接近度综合评分排序。"
+            description="将按复染后实测 ΔE、帘纹匹配度与厚度接近度综合评分排序。"
+            size="small"
+          />
+          <el-alert
+            v-if="retiredTypes.length > 0"
+            type="warning"
+            show-icon
+            :closable="false"
+            style="margin-bottom: 10px"
+            title="下列纸种复染两回仍不达标，已撤出候选，请修复师更换纸种"
+          >
+            <div v-for="item in retiredTypes" :key="item.type">
+              {{ item.label }}：最近实测 ΔE {{ item.last?.deltaE }}（{{ item.last?.date }}），共复染 {{ item.count }} 回
+            </div>
+          </el-alert>
+          <EmptyPanel
+            v-if="candidates.length === 0 && retiredTypes.length > 0"
+            title="候选纸种已全部撤出"
+            description="该书叶各纸种复染两回后实测色差均不达标，请考虑更换纸种后重新选配。"
             size="small"
           />
           <div v-else style="display: flex; flex-direction: column; gap: 10px">
@@ -385,6 +525,9 @@ function deltaTag(deltaE: number): { label: string; color: string } {
               <div class="gb-muted">
                 帘纹 {{ item.laidPattern }}（匹配 {{ laidPatternMatch(item.laidPattern, candidateLeafPattern) }}%）· 厚度
                 {{ item.thicknessMm }}mm · {{ item.hasRecord ? '已有登记' : '尚无登记（按基准色估算）' }}
+              </div>
+              <div v-if="item.redyed > 0" class="gb-muted">
+                已复染 {{ item.redyed }} 回，最近 {{ item.lastRedye?.date }} 实测 ΔE {{ item.lastRedye?.deltaE }}
               </div>
               <el-button
                 size="small"
@@ -439,6 +582,51 @@ function deltaTag(deltaE: number): { label: string; color: string } {
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
         <el-button type="primary" @click="submit">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="redyeDialog" title="复染登记" width="520px">
+      <div v-if="redyeTarget" class="gb-muted" style="margin-bottom: 12px">
+        {{ leafLabel(redyeTarget.leafId) }} · {{ PAPER_TYPE_LABEL[redyeTarget.paperType] }} ·
+        复染前 ΔE {{ redyeBeforeDeltaE }}（{{ redyeCount(redyeTarget) > 0 ? '上一回复染实测' : '初次选配估值' }}）
+      </div>
+      <el-form label-width="130px">
+        <el-form-item label="复染回次">
+          <el-tag effect="plain" round>第 {{ redyeNextRound }} 回</el-tag>
+        </el-form-item>
+        <el-form-item label="复染日期" required>
+          <el-input v-model="redyeForm.date" type="date" />
+        </el-form-item>
+        <el-form-item label="复染后实测 ΔE" required>
+          <el-input-number v-model="redyeForm.deltaE" :min="0" :max="20" :step="0.1" :precision="1" />
+          <el-tag
+            v-if="redyeTarget"
+            style="margin-left: 8px"
+            :style="{ color: deltaTag(redyeForm.deltaE).color, borderColor: `${deltaTag(redyeForm.deltaE).color}66` }"
+            effect="plain"
+            round
+          >
+            {{ deltaTag(redyeForm.deltaE).label }}
+          </el-tag>
+        </el-form-item>
+      </el-form>
+      <el-alert
+        v-if="redyeNextRound >= MAX_REDYE_ROUNDS"
+        type="warning"
+        show-icon
+        :closable="false"
+        title="这是该纸种第 2 回复染；若实测色差仍超阈值，该纸种将自动撤出候选推荐，请修复师更换纸种。"
+      />
+      <el-alert
+        v-else
+        type="info"
+        show-icon
+        :closable="false"
+        title="保存后按复染后实测色差重新判定达标状态并重算综合评分，列表排序、统计与导出台账同步更新。"
+      />
+      <template #footer>
+        <el-button @click="redyeDialog = false">取消</el-button>
+        <el-button type="primary" @click="submitRedye">保存复染记录</el-button>
       </template>
     </el-dialog>
   </div>

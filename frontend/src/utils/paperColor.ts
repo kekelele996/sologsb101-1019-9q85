@@ -4,7 +4,7 @@
  * - 帘纹匹配度评估
  * - 染色配方浓度换算
  */
-import { DEFAULT_DYE_RECIPE, DELTA_E_THRESHOLD, type PaperType } from '@/types/paper'
+import { DEFAULT_DYE_RECIPE, DELTA_E_THRESHOLD, effectiveDeltaE, type PaperType, type RedyeRecord } from '@/types/paper'
 
 /** 各纸种的基准色（sRGB 十六进制），用于色差比对 */
 export const PAPER_BASE_COLOR: Record<PaperType, string> = {
@@ -68,13 +68,14 @@ export function laidPatternMatch(paperPattern: string, leafPattern: string): num
   return 55
 }
 
-/** 综合候选评分：色差越小、帘纹越匹配、厚度越接近得分越高 */
+/** 综合候选评分：色差越小、帘纹越匹配、厚度越接近得分越高（色差按复染后实测值） */
 export function candidateScore(paper: {
   deltaE: number
   laidPattern: string
   thicknessMm: number
+  redyeHistory?: RedyeRecord[]
 }, leafPattern: string, leafThicknessMm = 0.06): number {
-  const colorScore = Math.max(0, 100 - paper.deltaE * 12)
+  const colorScore = Math.max(0, 100 - effectiveDeltaE(paper) * 12)
   const patternScore = laidPatternMatch(paper.laidPattern, leafPattern)
   const thicknessScore = Math.max(0, 100 - Math.abs(paper.thicknessMm - leafThicknessMm) * 800)
   return Math.round(colorScore * 0.5 + patternScore * 0.3 + thicknessScore * 0.2)
