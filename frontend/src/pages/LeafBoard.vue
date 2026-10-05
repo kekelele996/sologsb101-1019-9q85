@@ -16,7 +16,7 @@ import { useIdbTable } from '@/hooks/useIdbTable'
 import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
-import { PAPER_TYPE_LABEL, type Paper } from '@/types/paper'
+import { PAPER_TYPE_LABEL, effectiveDeltaE, type Paper } from '@/types/paper'
 import {
   DAMAGE_TYPE_OPTIONS,
   LEAF_STATE_COLOR,
@@ -197,7 +197,7 @@ async function addLeafRecord(leaf: Leaf): Promise<void> {
 function paperText(leafId: string): string {
   const paper = paperTable.rows.value.find((item) => item.leafId === leafId)
   if (!paper) return '未选配'
-  return `${PAPER_TYPE_LABEL[paper.paperType]} · ΔE ${paper.deltaE}`
+  return `${PAPER_TYPE_LABEL[paper.paperType]} · ΔE ${effectiveDeltaE(paper)}`
 }
 
 function phTag(ph: number): { label: string; color: string } {

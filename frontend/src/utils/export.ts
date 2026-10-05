@@ -11,7 +11,7 @@ import type { Binding } from '@/types/binding'
 import { BOOK_LEVEL_LABEL } from '@/types/book'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL } from '@/types/volume'
 import { DAMAGE_TYPE_LABEL, LEAF_STATE_LABEL } from '@/types/leaf'
-import { PAPER_TYPE_LABEL, deltaELevel } from '@/types/paper'
+import { PAPER_TYPE_LABEL, deltaELevel, effectiveDeltaE, redyeCount } from '@/types/paper'
 import { REPAIR_NAME_LABEL } from '@/types/repairOrder'
 import { BINDING_VERDICT_LABEL } from '@/types/binding'
 import type { RestoreSnapshot } from './db'
@@ -117,7 +117,10 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
     '补纸纸种',
     '帘纹',
     '厚度(mm)',
-    '色差ΔE',
+    '初始色差ΔE',
+    '复染次数',
+    '末次复染日期',
+    '实测色差ΔE',
     'ΔE判定',
     '染色配方',
     '工序进度',
@@ -133,6 +136,8 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
         .sort((a, b) => a.leafNo - b.leafNo)
       leaves.forEach((leaf) => {
         const paper = context.papers.find((item) => item.leafId === leaf.id)
+        const measuredDeltaE = paper ? effectiveDeltaE(paper) : null
+        const lastRedye = paper?.redyes?.[paper.redyes.length - 1]
         const orders = context.repairOrders
           .filter((order) => order.leafId === leaf.id)
           .sort((a, b) => a.seq - b.seq)
@@ -151,7 +156,10 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
             paper ? paper.laidPattern : '',
             paper ? paper.thicknessMm : '',
             paper ? paper.deltaE : '',
-            paper ? deltaELevel(paper.deltaE).label : '',
+            paper ? redyeCount(paper) : '',
+            lastRedye ? lastRedye.date : '',
+            measuredDeltaE ?? '',
+            measuredDeltaE === null ? '' : deltaELevel(measuredDeltaE).label,
             paper ? paper.dyeRecipe : '',
             `${done}/${orders.length}`,
             last ? REPAIR_NAME_LABEL[last.name] : '',
